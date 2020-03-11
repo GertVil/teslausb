@@ -57,7 +57,7 @@ function send_sns () {
 
 function send_webhook () {
   log "Sending Webhook message for moved files."
-  
+
   source /root/.teslaCamWebhookSettings
 
   # shellcheck disable=SC2154
@@ -66,8 +66,20 @@ function send_webhook () {
     "$WEBHOOK_URL"
 }
 
+function send_slack () {
+  log "Sending Slack message for moved files."
+
+  source /root/.teslaCamSlackSettings
+
+  # shellcheck disable=SC2154
+  curl -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\"$TITLE $MESSAGE\"}" \
+          $slack_url
+}
+
 [ -r "/root/.teslaCamPushoverCredentials" ] && send_pushover
 [ -r "/root/.teslaCamGotifySettings" ] && send_gotify
 [ -r "/root/.teslaCamIftttSettings" ] && send_ifttt
 [ -r "/root/.teslaCamSNSTopicARN" ] && send_sns
 [ -r "/root/.teslaCamWebhookSettings" ] && send_webhook
+[ -r "/root/.teslaCamSlackSettings" ] && send_slack

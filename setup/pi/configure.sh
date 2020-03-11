@@ -243,6 +243,20 @@ function check_webhook_configuration () {
     fi
 }
 
+function check_slack_configuration () {
+    # shellcheck disable=SC2154
+    if [ -n "${slack_enabled+x}" ]
+    then
+        if [ -z "${slack_url+x}" ]
+        then
+            log_progress "STOP: You're trying to setup slack but didn't provide your slack url"
+            log_progress "Define the variables like this:"
+            log_progress "export slack_url=put_your_slack_url_here"
+            exit 1
+        fi
+    fi
+}
+
 function check_sns_configuration () {
     # shellcheck disable=SC2154
     if [ -n "${sns_enabled+x}" ]
@@ -307,6 +321,19 @@ function configure_ifttt () {
     fi
 }
 
+function configure_slack () {
+    if [ -n "${slack_enabled+x}" ]
+    then
+        log_progress "Enabling Slack"
+        {
+            echo "export slack_enabled=true"
+            echo "export slack_url=$slack_url"
+        } > /root/.teslaCamSlackSettings
+    else
+        log_progress "Slack not configured."
+    fi
+}
+
 function configure_webhook () {
     if [ -n "${WEBHOOK_ENABLED+x}" ]
     then
@@ -366,6 +393,11 @@ function check_and_configure_webhook () {
 
     configure_webhook
 }
+function check_and_configure_slack () {
+    check_slack_configuration
+
+    configure_slack
+}
 
 function check_and_configure_sns () {
     check_sns_configuration
@@ -392,6 +424,7 @@ check_and_configure_gotify
 check_and_configure_ifttt
 check_and_configure_webhook
 check_and_configure_sns
+check_and_configure_slack
 install_push_message_scripts /root/bin
 
 check_archive_configs
