@@ -1,9 +1,75 @@
 #!/bin/bash -eu
 
+# this function is also called by archiveloop by sourcing this script
+function read_setup_variables {
+  if [ -z "${setup_file+x}" ]
+  then
+    local -r setup_file=/root/teslausb_setup_variables.conf
+  fi
+  if [ -e $setup_file ]
+  then
+    # "shellcheck" doesn't realize setup_file is effectively a constant
+    # shellcheck disable=SC1090
+    source $setup_file
+  else
+    echo "couldn't find $setup_file"
+    return 1
+  fi
+
+  # TODO: change this "declare" to "local" when github updates
+  # to a newer shellcheck.
+  declare -A newnamefor
+
+  newnamefor[archiveserver]=ARCHIVE_SERVER
+  newnamefor[camsize]=CAM_SIZE
+  newnamefor[musicsize]=MUSIC_SIZE
+  newnamefor[sharename]=SHARE_NAME
+  newnamefor[shareuser]=SHARE_USER
+  newnamefor[sharepassword]=SHARE_PASSWORD
+  newnamefor[tesla_email]=TESLA_EMAIL
+  newnamefor[tesla_password]=TESLA_PASSWORD
+  newnamefor[tesla_vin]=TESLA_VIN
+  newnamefor[timezone]=TIME_ZONE
+  newnamefor[usb_drive]=USB_DRIVE
+
+  local oldname
+  for oldname in "${!newnamefor[@]}"
+  do
+    local newname=${newnamefor[$oldname]}
+    if [[ -z ${!newname+x} ]] && [[ -n ${!oldname+x} ]]
+    then
+      local value=${!oldname}
+      export $newname="$value"
+    fi
+  done
+
+  # set defaults for things not set in the config
+  REPO=${REPO:-marcone}
+  BRANCH=${BRANCH:-main-dev}
+  CONFIGURE_ARCHIVING=${CONFIGURE_ARCHIVING:-true}
+  UPGRADE_PACKAGES=${UPGRADE_PACKAGES:-false}
+  TESLAUSB_HOSTNAME=${TESLAUSB_HOSTNAME:-teslausb}
+  SAMBA_ENABLED=${SAMBA_ENABLED:-false}
+  SAMBA_GUEST=${SAMBA_GUEST:-false}
+  SNAPSHOTS_ENABLED=${SNAPSHOTS_ENABLED:-true}
+  INCREASE_ROOT_SIZE=${INCREASE_ROOT_SIZE:-0}
+  export CAM_SIZE=${CAM_SIZE:-90%}
+  export MUSIC_SIZE=${MUSIC_SIZE:-100%}
+  export USB_DRIVE=${USB_DRIVE:-''}
+}
+
+if [ "$0" == "-bash" ]
+then
+  # called from .bashrc as part of root login, set completion
+  complete -W "diagnose upgrade selfupdate install" setup-teslausb
+  return 0
+fi
+
 if [ "${BASH_SOURCE[0]}" != "$0" ]
 then
-  echo "${BASH_SOURCE[0]} must be executed, not sourced"
-  return 1 # shouldn't use exit when sourced
+  echo "${BASH_SOURCE[0]} was sourced, setting setup variables"
+  read_setup_variables
+  return 0 # shouldn't use exit when sourced
 fi
 
 if [ "${FLOCKED:-}" != "$0" ]
@@ -21,56 +87,22 @@ then
   fi
 fi
 
-HEADLESS_SETUP=${HEADLESS_SETUP:-false}
-if [ "$HEADLESS_SETUP" = "false" ] && [ -t 0 ]
-then
-  # running in terminal in non-headless mode
-  if [ -f /boot/teslausb_setup_variables.conf ] || [ -f /root/teslausb_setup_variables.conf ]
-  then
-    # headless setup variables are available
-    read -r -p "Read setup info from teslausb_setup_variables.conf (yes/no/cancel)? " answer
-    case ${answer:0:1} in
-      y|Y )
-          HEADLESS_SETUP=true
-      ;;
-      n|N )
-      ;;
-      * )
-          exit
-      ;;
-    esac
-  fi
-fi
-
-REPO=${REPO:-marcone}
-BRANCH=${BRANCH:-main-dev}
-USE_LED_FOR_SETUP_PROGRESS=true
-CONFIGURE_ARCHIVING=${CONFIGURE_ARCHIVING:-true}
-UPGRADE_PACKAGES=${UPGRADE_PACKAGES:-false}
-TESLAUSB_HOSTNAME=${TESLAUSB_HOSTNAME:-teslausb}
-SAMBA_ENABLED=${SAMBA_ENABLED:-false}
-SAMBA_GUEST=${SAMBA_GUEST:-false}
-SNAPSHOTS_ENABLED=${SNAPSHOTS_ENABLED:-true}
-INCREASE_ROOT_SIZE=${INCREASE_ROOT_SIZE:-0}
-export camsize=${camsize:-90%}
-export musicsize=${musicsize:-100%}
-export usb_drive=${usb_drive:-''}
-
 function setup_progress () {
   local setup_logfile=/boot/teslausb-headless-setup.log
-  if [ $HEADLESS_SETUP = "true" ] && [ -w $setup_logfile ]
+  if [ -w $setup_logfile ]
   then
     echo "$( date ) : $*" >> "$setup_logfile"
   fi
   echo "$@"
 }
 
-# shellcheck disable=SC2046
-if ! [ $(id -u) = 0 ]
+if [[ $EUID -ne 0 ]]
 then
   setup_progress "STOP: Run sudo -i."
   exit 1
 fi
+
+read_setup_variables
 
 function dehumanize () {
   echo $(($(echo "$1" | sed 's/GB/G/;s/MB/M/;s/KB/K/;s/G/*1024M/;s/M/*1024K/;s/K/*1024/')))
@@ -80,7 +112,7 @@ REBOOT=false
 
 # wpa_supplicant should have a country code. Use US as the default
 # to avoid using the disallowed channels in the US.
-WPA=/etc/wpa_supplicant/wpa_supplicant.conf 
+WPA=/etc/wpa_supplicant/wpa_supplicant.conf
 if ! grep -q "country=" $WPA
 then
   setup_progress "adding country code to wpa_supplicant.conf"
@@ -88,22 +120,26 @@ then
   REBOOT=true
 fi
 
+readonly BOOT_DEVICE=$(lsblk -dpno pkname /dev/disk/by-label/boot)
+export BOOT_DEVICE
+readonly BOOT_DEVICE_PART=$(lsblk -dpno name /dev/disk/by-label/boot | sed 's/1$//')
+export BOOT_DEVICE_PART
 INCREASE_ROOT_SIZE=$(($(dehumanize "$INCREASE_ROOT_SIZE") / 512))
 
-if [ "$INCREASE_ROOT_SIZE" != "0" ] && [ ! -e /dev/mmcblkp03 ]
+if [ "$INCREASE_ROOT_SIZE" != "0" ] && [ ! -e "${BOOT_DEVICE_PART}3" ]
 then
   if [ ! -e /root/TESLAUSB_ROOT_PARTITION_INCREASED ]
   then
     touch /root/TESLAUSB_ROOT_PARTITION_INCREASED
-    ROOTSTART=$(partx --show -g -o START /dev/mmcblk0p2)
-    ROOTSIZE=$(partx --show -g -o SECTORS /dev/mmcblk0p2)
+    ROOTSTART=$(partx --show -g -o START "${BOOT_DEVICE_PART}2")
+    ROOTSIZE=$(partx --show -g -o SECTORS "${BOOT_DEVICE_PART}2")
     ROOTSIZE=$((ROOTSIZE + INCREASE_ROOT_SIZE))
-    echo "$ROOTSTART,$ROOTSIZE" | sfdisk --force /dev/mmcblk0 -N 2
+    echo "$ROOTSTART,$ROOTSIZE" | sfdisk --force "${BOOT_DEVICE}" -N 2
     setup_progress "increased root partition size"
     REBOOT=true
   else
     setup_progress "increasing root filesystem size to match partition size"
-    resize2fs /dev/mmcblk0p2
+    resize2fs "${BOOT_DEVICE_PART}2"
   fi
 fi
 
@@ -120,33 +156,10 @@ then
   fi
 fi
 
-function headless_setup_populate_variables () {
-  # Pull in the conf file variables to make avail to this script and subscripts
-  # If setup-teslausb is run from rc.local, the conf file will have been moved
-  # to /root by rc.local
-  if [ $HEADLESS_SETUP = "true" ]
-  then
-    if [ -e /boot/teslausb_setup_variables.conf ]
-    then
-      setup_progress "reading config from /boot/teslausb_setup_variables.conf"
-      source /boot/teslausb_setup_variables.conf
-    elif [ -e /root/teslausb_setup_variables.conf ]
-    then
-      setup_progress "reading config from /root/teslausb_setup_variables.conf"
-      source /root/teslausb_setup_variables.conf
-    else
-      setup_progress "couldn't find config file"
-    fi
-  fi
-}
-
 function headless_setup_mark_setup_success () {
-  if [ $HEADLESS_SETUP = "true" ]
-  then
-    rm -f /boot/TESLAUSB_SETUP_FAILED
-    rm -f /boot/TESLAUSB_SETUP_STARTED
-    touch /boot/TESLAUSB_SETUP_FINISHED
-  fi
+  rm -f /boot/TESLAUSB_SETUP_FAILED
+  rm -f /boot/TESLAUSB_SETUP_STARTED
+  touch /boot/TESLAUSB_SETUP_FINISHED
 }
 
 function isPi4 {
@@ -174,7 +187,7 @@ function flash () {
 }
 
 function headless_setup_progress_flash () {
-  if [ $USE_LED_FOR_SETUP_PROGRESS = "true" ] && [ $HEADLESS_SETUP = "true" ] && [ ! -t 0 ]
+  if [ ! -t 0 ]
   then
     flash "$1"
   fi
@@ -208,7 +221,7 @@ function get_script () {
   fi
 
   # shellcheck disable=SC2086
-  curlwrapper -o "$local_path/$name" $CURL_PREFIX/"$remote_path"/"$name"
+  curlwrapper -o "$local_path/$name" $CURL_PREFIX"/$remote_path/$name"
   chmod +x "$local_path/$name"
   setup_progress "Downloaded $local_path/$name ..."
 }
@@ -224,7 +237,6 @@ function get_common_scripts () {
   get_script /root/bin remountfs_rw run
   get_script /root/bin make_snapshot.sh run
   get_script /root/bin mount_snapshot.sh run
-  get_script /root/bin mount_image.sh run
   get_script /root/bin release_snapshot.sh run
   get_script /root/bin force_sync.sh run
 }
@@ -264,7 +276,19 @@ function create_usb_drive_backing_files () {
   if [ ! -e $BACKINGFILES_MOUNTPOINT/cam_disk.bin ]
   then
     setup_progress "Creating backing disk files."
-    /tmp/create-backingfiles.sh "$camsize" "$musicsize" "$BACKINGFILES_MOUNTPOINT"
+    /tmp/create-backingfiles.sh "$CAM_SIZE" "$MUSIC_SIZE" "$BACKINGFILES_MOUNTPOINT"
+  else
+    # mount cam image and make sure the right directories exist
+    umount /mnt/cam || true
+    if modprobe -r g_mass_storage && mount /mnt/cam
+    then
+      mkdir -p /mnt/cam/TeslaCam
+      mkdir -p /mnt/cam/TeslaTrackMode
+      umount /mnt/cam
+    else
+      setup_progress "STOP: Couldn't check image"
+      exit 1
+    fi
   fi
 }
 
@@ -306,20 +330,26 @@ function upgrade_packages () {
   if [ "$UPGRADE_PACKAGES" = true ]
   then
     setup_progress "Upgrading installed packages..."
+    # clean the cache to free up space, since especially
+    # a kernel update requires quite a bit of temporary
+    # extra space
+    apt-get clean
     apt-get --assume-yes upgrade
   else
     setup_progress "Skipping package upgrade."
   fi
+  # no real need to keep the cache around after setup
+  apt-get clean
+  fstrim / || true
 }
 
 function set_timezone () {
-  # shellcheck disable=SC2154
-  if [ -n "${timezone:+x}" ]
+  if [ -n "${TIME_ZONE:+x}" ]
   then
-    if [ -f "/usr/share/zoneinfo/$timezone" ]
+    if [ -f "/usr/share/zoneinfo/$TIME_ZONE" ]
     then
-      ln -sf "/usr/share/zoneinfo/$timezone" /etc/localtime
-    elif [ "$timezone" = "auto" ]
+      ln -sf "/usr/share/zoneinfo/$TIME_ZONE" /etc/localtime
+    elif [ "$TIME_ZONE" = "auto" ]
     then
       if curlwrapper -o /root/bin/tzupdate.py https://raw.githubusercontent.com/marcone/tzupdate/develop/tzupdate.py
       then
@@ -333,15 +363,14 @@ function set_timezone () {
         fi
       fi
     else
-      setup_progress "invalid timezone: $timezone"
+      setup_progress "invalid timezone: $TIME_ZONE"
     fi
   fi
 }
 
 function cmd_install {
   /root/bin/remountfs_rw
-  # shellcheck disable=SC2046
-  get_script /root/bin $(basename "$1") $(dirname "$1")
+  get_script /root/bin "$(basename "$1")" "$(dirname "$1")"
   setup_progress "$1 installed in /root/bin/"
   exit
 }
@@ -360,6 +389,40 @@ function cmd_selfupdate {
   exit 0
 }
 
+function cmd_upgrade {
+  if [ ! -e /boot/TESLAUSB_SETUP_FINISHED ]
+  then
+    echo "STOP: previous setup didn't finish, can't upgrade unfinished install"
+    exit 1
+  fi
+  get_script /tmp setup-teslausb setup/pi &> /dev/null
+  exec bash -c "/tmp/setup-teslausb upgrade_prepare && /tmp/setup-teslausb && /tmp/setup-teslausb upgrade_finish" < /dev/null
+}
+
+function cmd_upgrade_prepare {
+  setup_progress "preparing for full upgrade"
+  killall archiveloop || true
+  service smbd stop || true
+  service autofs stop || true
+  umount /backingfiles/snapshots/snap*/mnt || true
+  umount /mnt/cam /mnt/music || true
+  umount /mnt/archive /mnt/musicarchive || true
+  modprobe -r g_mass_storage
+  /root/bin/remountfs_rw > /dev/null
+}
+
+function cmd_upgrade_finish {
+  mv /tmp/setup-teslausb /root/bin/setup-teslausb
+  setup_progress "upgrade finished"
+  for i in {5..1}
+  do
+    echo -e -n "rebooting in $i seconds to apply changes, press ctrl-c to abort\r"
+    sleep 1
+  done
+  echo -e '\nRebooting'
+  systemctl start reboot.target
+}
+
 function cmd_diagnose {
   local hardware
   local os
@@ -370,24 +433,13 @@ function cmd_diagnose {
     echo -e "====== summary ======"
     echo -e "hardware: ${hardware}"
     echo -e "OS: ${os}"
-    if [ -e /root/teslausb_setup_variables.conf ]
-    then
-      echo "headless setup config in /root"
-      source /root/teslausb_setup_variables.conf
-    elif [ -e /boot/teslausb_setup_variables.conf ]
-    then
-      echo "headless setup config in /boot"
-      source /boot/teslausb_setup_variables.conf
-    else
-      echo "headless setup config not found"
-    fi
     if [ "${ARCHIVE_SYSTEM:-none}" = "cifs" ]
     then
       if grep -q '/mnt/archive' /etc/fstab
       then
         echo "CIFS archiving selected"
       else
-        echo "CIFS archiving selected, but archive not defined in fstab"
+        echo "ERROR: CIFS archiving selected, but archive not defined in fstab"
       fi
     else
       echo "archive method: ${ARCHIVE_SYSTEM:-none}"
@@ -395,7 +447,7 @@ function cmd_diagnose {
 
     if ! blkid -L backingfiles > /dev/null
     then
-      echo "backingfiles partition does not exist"
+      echo "ERROR: backingfiles partition does not exist"
     fi
     if [ ! -d /backingfiles ]
     then
@@ -403,16 +455,16 @@ function cmd_diagnose {
     fi
     if ! grep -q '/backingfiles' /etc/fstab
     then
-      echo "backingfiles not in fstab"
+      echo "ERROR: backingfiles not in fstab"
     fi
 
     if [ ! -f /backingfiles/cam_disk.bin ]
     then
-      echo "cam disk image does not exist"
+      echo "ERROR: cam disk image does not exist"
     fi
     if ! grep -q '/backingfiles/cam_disk.bin' /etc/fstab
     then
-      echo "cam disk image not in fstab"
+      echo "ERROR: cam disk image not in fstab"
     fi
     for LUN0 in /sys/devices/platform/soc/??980000.usb/gadget/lun0/file
     do
@@ -430,15 +482,15 @@ function cmd_diagnose {
     done
     if ! blkid -L mutable > /dev/null
     then
-      echo "mutable partition does not exist"
+      echo "ERROR: mutable partition does not exist"
     fi
     if [ ! -d /mutable ]
     then
-      echo "mutable directory does not exist"
+      echo "ERROR: mutable directory does not exist"
     fi
     if ! grep -q '/mutable' /etc/fstab
     then
-      echo "mutable not in fstab"
+      echo "ERROR: mutable not in fstab"
     fi
 
     numsnapshots=$( mount | grep -c snapshot )
@@ -446,14 +498,14 @@ function cmd_diagnose {
 
     if [ ! -e /boot/TESLAUSB_SETUP_FINISHED ]
     then
-      echo 'setup did not finish'
+      echo 'ERROR: setup did not finish'
     fi
 
     echo -e "====== disk / images ======"
-    parted -s /dev/mmcblk0 print || true
-    if [ -n "${usb_drive:+x}" ]
+    parted -s "${BOOT_DEVICE}" print || true
+    if [ -n "${USB_DRIVE:+x}" ]
     then
-      parted -s "$usb_drive" print || true
+      parted -s "$USB_DRIVE" print || true
     fi
     if [ -f /backingfiles/cam_disk.bin ]
     then
@@ -537,9 +589,6 @@ function cmd_diagnose {
 }
 
 export -f setup_progress
-export HEADLESS_SETUP
-
-headless_setup_populate_variables
 
 INSTALL_DIR=${INSTALL_DIR:-/root/bin}
 if [ "$INSTALL_DIR" != "/root/bin" ]
@@ -571,8 +620,10 @@ fi
 
 configure_hostname
 
-get_script /tmp setup-teslausb setup/pi &> /dev/null
-if cmp -s /tmp/setup-teslausb /root/bin/setup-teslausb
+tmpdir=/tmp/$$
+mkdir -p "$tmpdir"
+get_script "$tmpdir" setup-teslausb setup/pi &> /dev/null
+if cmp -s "$tmpdir/setup-teslausb" "$0"
 then
   setup_progress "$0 is up to date"
 else
@@ -621,7 +672,7 @@ else
   setup_progress "skipping configure.sh"
 fi
 
-if [ "$SAMBA_ENABLED" = "true" ] 
+if [ "$SAMBA_ENABLED" = "true" ]
 then
   if [ "$SNAPSHOTS_ENABLED" = "true" ]
   then
@@ -637,6 +688,20 @@ if [ -n "${AP_SSID:+x}" ]
 then
   get_script /tmp configure-ap.sh setup/pi
   /tmp/configure-ap.sh
+fi
+
+if [ "$SNAPSHOTS_ENABLED" = "true" ]
+then
+  get_script /tmp configure-automount.sh setup/pi
+  /tmp/configure-automount.sh
+else
+  setup_progress "skipping automount setup because snapshots are disabled"
+fi
+
+# source setup-teslausb from .bashrc to set up completion
+if ! grep -q setup-teslausb /root/.bashrc
+then
+  echo "source /root/bin/setup-teslausb" >> /root/.bashrc
 fi
 
 make_root_fs_readonly

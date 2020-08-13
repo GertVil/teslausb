@@ -7,8 +7,8 @@ then
 fi
 
 function log_progress () {
-  # shellcheck disable=SC2034
-  if typeset -f setup_progress > /dev/null; then
+  if declare -F setup_progress > /dev/null
+  then
     setup_progress "configure: $1"
   fi
   echo "configure: $1"
@@ -47,37 +47,6 @@ function check_variable () {
     fi
 }
 
-function install_rc_local () {
-    local install_home="$1"
-
-    if grep -q archiveloop /etc/rc.local
-    then
-        log_progress "Skipping rc.local installation"
-        return
-    fi
-
-    log_progress "Configuring /etc/rc.local to run the archive scripts at startup..."
-    echo "#!/bin/bash -eu" > ~/rc.local
-    echo "install_home=\"${install_home}\"" >> ~/rc.local
-    cat << 'EOF' >> ~/rc.local
-LOGFILE=/tmp/rc.local.log
-
-function log () {
-  echo "$( date )" >> "$LOGFILE"
-  echo "$1" >> "$LOGFILE"
-}
-
-log "Launching archival script..."
-"$install_home"/archiveloop &
-log "All done"
-exit 0
-EOF
-
-    cat ~/rc.local > /etc/rc.local
-    rm ~/rc.local
-    log_progress "Installed rc.local."
-}
-
 function check_archive_configs () {
     log_progress "Checking archive configs: "
 
@@ -86,21 +55,21 @@ function check_archive_configs () {
             check_variable "RSYNC_USER"
             check_variable "RSYNC_SERVER"
             check_variable "RSYNC_PATH"
-            export archiveserver="$RSYNC_SERVER"
+            export ARCHIVE_SERVER="$RSYNC_SERVER"
             ;;
         rclone)
             check_variable "RCLONE_DRIVE"
             check_variable "RCLONE_PATH"
-            export archiveserver="8.8.8.8" # since it's a cloud hosted drive we'll just set this to google dns
+            export ARCHIVE_SERVER="8.8.8.8" # since it's a cloud hosted drive we'll just set this to google dns
             ;;
         cifs)
-            check_variable "sharename"
-            check_variable "shareuser"
-            check_variable "sharepassword"
-            check_variable "archiveserver"
+            check_variable "SHARE_NAME"
+            check_variable "SHARE_USER"
+            check_variable "SHARE_PASSWORD"
+            check_variable "ARCHIVE_SERVER"
             ;;
         none)
-            export archiveserver=localhost
+            export ARCHIVE_SERVER=localhost
             ;;
         *)
             log_progress "STOP: Unrecognized archive system: $ARCHIVE_SYSTEM"
@@ -133,35 +102,63 @@ function get_archive_module () {
     esac
 }
 
+function install_and_configure_tesla_api () {
+  # Install the tesla_api.py script only if the user provided credentials for its use.
+
+  if [ -e /root/bin/tesla_api.py ]
+  then
+    # if tesla_api.py already exists, update it
+    log_progress "Updating tesla_api.py"
+    get_script /root/bin tesla_api.py run
+    # check if the json file needs to be updated
+    readonly json=/mutable/tesla_api.json
+    if [ -e $json ] && ! grep -q '"id"' $json
+    then
+      log_progress "Updating tesla_api.py config file"
+      sed -i 's/"vehicle_id"/"id"/' $json
+      sed -i 's/"$/",\n  "vehicle_id": 0/' $json
+      # Call script to fill in the empty vehicle_id field
+      if ! /root/bin/tesla_api.py list_vehicles
+      then
+        log_progress "tesla_ap.py config update failed"
+      fi
+    fi
+  elif [[ ( -n "${TESLA_EMAIL:+x}" && -n "${TESLA_PASSWORD:+x}" ) || ( -n "${TESLA_ACCESS_TOKEN:+x}" && -n "${TESLA_REFRESH_TOKEN:+x}" ) ]]
+  then
+    log_progress "Installing tesla_api.py"
+    get_script /root/bin tesla_api.py run
+    # Perform the initial authentication
+    mount /mutable || log_progress "Failed to mount /mutable"
+    if ! /root/bin/tesla_api.py list_vehicles
+    then
+      log_progress "tesla_ap.py setup failed"
+    fi
+  else
+    log_progress "Skipping tesla_api.py install because no credentials were provided"
+  fi
+}
+
 function install_archive_scripts () {
-    local install_path="$1"
-    local archive_module="$2"
+  local install_path="$1"
+  local archive_module="$2"
 
-    log_progress "Installing base archive scripts into $install_path"
-    get_script "$install_path" archiveloop run
-    get_script "$install_path" waitforidle run
-    get_script "$install_path" remountfs_rw run
-    # Install the tesla_api.py script only if the user provided credentials for its use.
-    # shellcheck disable=SC2154
-    if [ -n "${tesla_email:+x}" ]
-    then
-      get_script "$install_path" tesla_api.py run
-    else
-      log_progress "Skipping tesla_api.py install"
-    fi
-
-    log_progress "Installing archive module scripts"
-    get_script /tmp verify-and-configure-archive.sh "$archive_module"
-    get_script "$install_path" archive-clips.sh "$archive_module"
-    get_script "$install_path" connect-archive.sh "$archive_module"
-    get_script "$install_path" disconnect-archive.sh "$archive_module"
-    get_script "$install_path" write-archive-configs-to.sh "$archive_module"
-    get_script "$install_path" archive-is-reachable.sh "$archive_module"
-    # shellcheck disable=SC2154
-    if [ -n "${musicsharename:+x}" ] && grep cifs <<< "$archive_module"
-    then
-      get_script "$install_path" copy-music.sh "$archive_module"
-    fi
+  log_progress "Installing base archive scripts into $install_path"
+  get_script "$install_path" archiveloop run
+  get_script "$install_path" waitforidle run
+  get_script "$install_path" remountfs_rw run
+  install_and_configure_tesla_api
+  log_progress "Installing archive module scripts"
+  get_script /tmp verify-and-configure-archive.sh "$archive_module"
+  get_script "$install_path" archive-clips.sh "$archive_module"
+  get_script "$install_path" connect-archive.sh "$archive_module"
+  get_script "$install_path" disconnect-archive.sh "$archive_module"
+  get_script "$install_path" write-archive-configs-to.sh "$archive_module"
+  get_script "$install_path" archive-is-reachable.sh "$archive_module"
+  # shellcheck disable=SC2154
+  if [ -n "${musicsharename:+x}" ] && grep cifs <<< "$archive_module"
+  then
+    get_script "$install_path" copy-music.sh "$archive_module"
+  fi
 }
 
 
@@ -223,6 +220,24 @@ function check_ifttt_configuration () {
         elif [ "${ifttt_event_name}" = "put_your_event_name_here" ] || [  "${ifttt_key}" = "put_your_key_here" ]
         then
             log_progress "STOP: You're trying to setup IFTTT, but didn't replace the default Event Name and/or key values."
+            exit 1
+        fi
+    fi
+}
+
+function check_webhook_configuration () {
+    # shellcheck disable=SC2154
+    if [ -n "${WEBHOOK_ENABLED+x}" ]
+    then
+        if [ -z "${WEBHOOK_URL+x}"  ]
+        then
+            log_progress "STOP: You're trying to setup a Webhook but didn't provide your webhook url."
+            log_progress "Define the variable like this:"
+            log_progress "export WEBHOOK_URL=http://domain/path/"
+            exit 1
+        elif [ "${WEBHOOK_URL}" = "http://domain/path/" ]
+        then
+            log_progress "STOP: You're trying to setup a Webhook, but didn't replace the default url."
             exit 1
         fi
     fi
@@ -292,6 +307,19 @@ function configure_ifttt () {
     fi
 }
 
+function configure_webhook () {
+    if [ -n "${WEBHOOK_ENABLED+x}" ]
+    then
+        log_progress "Enabling Webhook"
+        {
+            echo "export WEBHOOK_ENABLED=true"
+            echo "export WEBHOOK_URL=$WEBHOOK_URL"
+        } > /root/.teslaCamWebhookSettings
+    else
+        log_progress "Webhook not configured."
+    fi
+}
+
 function configure_sns () {
     # shellcheck disable=SC2154
     if [ -n "${sns_enabled+x}" ]
@@ -333,6 +361,11 @@ function check_and_configure_ifttt () {
     configure_ifttt
 }
 
+function check_and_configure_webhook () {
+    check_webhook_configuration
+
+    configure_webhook
+}
 
 function check_and_configure_sns () {
     check_sns_configuration
@@ -346,8 +379,7 @@ function install_push_message_scripts() {
     get_script "$install_path" send_sns.py run
 }
 
-# shellcheck disable=SC2046
-if ! [ $(id -u) = 0 ]
+if [[ $EUID -ne 0 ]]
 then
     log_progress "STOP: Run sudo -i."
     exit 1
@@ -358,16 +390,13 @@ mkdir -p /root/bin
 check_and_configure_pushover
 check_and_configure_gotify
 check_and_configure_ifttt
+check_and_configure_webhook
 check_and_configure_sns
 install_push_message_scripts /root/bin
 
 check_archive_configs
 
-configFile=/root/teslausb.conf
-
-echo "ARCHIVE_HOST_NAME=$archiveserver" > $configFile
-echo "ARCHIVE_DELAY=${archivedelay:-20}" >> $configFile
-echo "SNAPSHOTS_ENABLED=${SNAPSHOTS_ENABLED:-true}" >> $configFile
+rm -f /root/teslausb.conf
 
 archive_module="$( get_archive_module )"
 log_progress "Using archive module: $archive_module"
@@ -375,4 +404,20 @@ log_progress "Using archive module: $archive_module"
 install_archive_scripts /root/bin "$archive_module"
 /tmp/verify-and-configure-archive.sh
 
-install_rc_local /root/bin
+systemctl disable teslausb.service || true
+
+cat << EOF > /lib/systemd/system/teslausb.service
+[Unit]
+Description=TeslaUSB archiveloop service
+DefaultDependencies=no
+After=mutable.mount backingfiles.mount
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /root/bin/archiveloop
+
+[Install]
+WantedBy=backingfiles.mount
+EOF
+
+systemctl enable teslausb.service

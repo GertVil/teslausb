@@ -4,22 +4,21 @@ VERS_OPT=
 SEC_OPT=
 
 function log_progress () {
-  # shellcheck disable=SC2034
-  if typeset -f setup_progress > /dev/null; then
+  if declare -F setup_progress > /dev/null
+  then
     setup_progress "verify-and-configure-archive: $*"
   fi
   echo "verify-and-configure-archive: $1"
 }
 
 function check_archive_server_reachable () {
-  # shellcheck disable=SC2154
-  log_progress "Verifying that the archive server $archiveserver is reachable..."
+  log_progress "Verifying that the archive server $ARCHIVE_SERVER is reachable..."
   local serverunreachable=false
-  hping3 -c 1 -S -p 445 "$archiveserver" 1>/dev/null 2>&1 || serverunreachable=true
+  hping3 -c 1 -S -p 445 "$ARCHIVE_SERVER" 1>/dev/null 2>&1 || serverunreachable=true
 
   if [ "$serverunreachable" = true ]
   then
-    log_progress "STOP: The archive server $archiveserver is unreachable. Try specifying its IP address instead."
+    log_progress "STOP: The archive server $ARCHIVE_SERVER is unreachable. Try specifying its IP address instead."
     exit 1
   fi
 
@@ -94,12 +93,12 @@ function install_required_packages () {
 install_required_packages
 
 check_archive_server_reachable
-# shellcheck disable=SC2154
-check_archive_mountable "$archiveserver" "$sharename"
+
+check_archive_mountable "$ARCHIVE_SERVER" "$SHARE_NAME"
 # shellcheck disable=SC2154
 if [ -n "${musicsharename:+x}" ]
 then
-  check_archive_mountable "$archiveserver" "$musicsharename"
+  check_archive_mountable "$ARCHIVE_SERVER" "$musicsharename"
 fi
 
 function configure_archive () {
@@ -118,8 +117,8 @@ function configure_archive () {
 
   if ! grep -w -q "$archive_path" /etc/fstab
   then
-    local sharenameforstab="${sharename// /\\040}"
-    echo "//$archiveserver/$sharenameforstab $archive_path cifs credentials=${credentials_file_path},iocharset=utf8,file_mode=0777,dir_mode=0777,$VERS_OPT,$SEC_OPT 0" >> /etc/fstab
+    local sharenameforstab="${SHARE_NAME// /\\040}"
+    echo "//$ARCHIVE_SERVER/$sharenameforstab $archive_path cifs noauto,credentials=${credentials_file_path},iocharset=utf8,file_mode=0777,dir_mode=0777,$VERS_OPT,$SEC_OPT 0" >> /etc/fstab
   fi
 
   if [ -n "${musicsharename:+x}" ]
@@ -131,10 +130,16 @@ function configure_archive () {
     if ! grep -w -q "$music_archive_path" /etc/fstab
     then
       local musicsharenameforstab="${musicsharename// /\\040}"
-      echo "//$archiveserver/$musicsharenameforstab $music_archive_path cifs credentials=${credentials_file_path},iocharset=utf8,file_mode=0777,dir_mode=0777,$VERS_OPT,$SEC_OPT 0" >> /etc/fstab
+      echo "//$ARCHIVE_SERVER/$musicsharenameforstab $music_archive_path cifs noauto,credentials=${credentials_file_path},iocharset=utf8,file_mode=0777,dir_mode=0777,$VERS_OPT,$SEC_OPT 0" >> /etc/fstab
     fi
   fi
 
+  # update fstab if it doesn't already use "noauto" for the archive(s)
+  if grep " credentials=" /etc/fstab
+  then
+    log_progress "adding 'noauto' to archive entries in fstab"
+    sed -i 's/ credentials=/ noauto,credentials=/' /etc/fstab
+  fi
   log_progress "Configured the archive."
 }
 

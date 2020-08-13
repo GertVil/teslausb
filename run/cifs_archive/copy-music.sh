@@ -17,7 +17,7 @@ function connectionmonitor {
     # shellcheck disable=SC2034
     for i in {1..10}
     do
-      if timeout 3 /root/bin/archive-is-reachable.sh "$ARCHIVE_HOST_NAME"
+      if timeout 3 /root/bin/archive-is-reachable.sh "$ARCHIVE_SERVER"
       then
         # sleep and then continue outer loop
         sleep 5
@@ -40,7 +40,7 @@ fi
 
 connectionmonitor $$ &
 
-# Delete files from the local partition(DST) files that do not exist in the 
+# Delete files from the local partition(DST) files that do not exist in the
 # music archive(SRC). This frees space for the new files that may be added.
 while IFS= read -r -d '' file_name
 do

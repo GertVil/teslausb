@@ -3,8 +3,8 @@
 # Adapted from https://github.com/adafruit/Raspberry-Pi-Installer-Scripts/blob/master/read-only-fs.sh
 
 function log_progress () {
-  # shellcheck disable=SC2034
-  if typeset -f setup_progress > /dev/null; then
+  if declare -F setup_progress > /dev/null
+  then
     setup_progress "make-root-fs-readonly: $1"
   fi
   echo "make-root-fs-readonly: $1"
@@ -24,8 +24,12 @@ function append_cmdline_txt_param() {
   fi
 }
 
+log_progress "Disabling unnecessary service..."
+systemctl disable apt-daily.timer
+systemctl disable apt-daily-upgrade.timer
+
 log_progress "Removing unwanted packages..."
-apt-get remove -y --force-yes --purge triggerhappy logrotate dphys-swapfile
+apt-get remove -y --force-yes --purge triggerhappy logrotate dphys-swapfile bluez alsa-utils
 apt-get -y --force-yes autoremove --purge
 # Replace log management with busybox (use logread if needed)
 log_progress "Installing ntp and busybox-syslogd..."
